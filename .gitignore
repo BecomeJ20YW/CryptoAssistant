@@ -5,6 +5,8 @@ __pycache__/
 
 # API配置文件
 api_config.json
+mainnet_config.json
+testnet_config.json
 
 # 环境文件
 .env

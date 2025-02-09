@@ -1,141 +1,159 @@
-import requests
-import time
-import hmac
-import hashlib
 import sys
-import json
-from urllib.parse import urlencode
-from config import API_KEY, API_SECRET
-from tabulate import tabulate
+import argparse
+import questionary
+from config import load_api_config
+from src.mainnet_trade import run_mainnet
+from src.testnet_trade import run_testnet
 
-class BinanceClient:
-    def __init__(self, api_key, api_secret):
-        self.API_KEY = api_key
-        self.API_SECRET = api_secret
-        self.BASE_URL = 'https://fapi.binance.com'
+def create_parser():
+    """创建命令行参数解析器"""
+    parser = argparse.ArgumentParser(
+        description='币安合约账户监控工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 运行测试网环境
+  python main.py test
+  
+  # 运行主网环境
+  python main.py main
+  
+  # 直接开始测试交易（测试网）
+  python main.py trade
+  
+  # 只查看账户状态（主网）
+  python main.py status
+  
+  # 修改杠杆倍数（测试网）
+  python main.py leverage BTCUSDT 20
+  
+  # 启动交互式菜单
+  python main.py
+"""
+    )
+    
+    # 创建子命令解析器
+    subparsers = parser.add_subparsers(dest='command', help='可用命令')
+    
+    # test 命令 - 运行测试网
+    subparsers.add_parser('test', help='运行测试网环境')
+    
+    # main 命令 - 运行主网
+    subparsers.add_parser('main', help='运行主网环境')
+    
+    # trade 命令 - 直接进入测试交易模式
+    subparsers.add_parser('trade', help='直接进入测试交易模式（测试网）')
+    
+    # status 命令 - 查看账户状态
+    status_parser = subparsers.add_parser('status', help='查看账户状态')
+    status_parser.add_argument('--env', choices=['main', 'test'], 
+                             default='main', help='选择环境 (main 或 test)')
+    
+    # leverage 命令 - 修改杠杆倍数
+    leverage_parser = subparsers.add_parser('leverage', help='修改杠杆倍数')
+    leverage_parser.add_argument('symbol', help='交易对，例如 BTCUSDT')
+    leverage_parser.add_argument('leverage', type=int, help='杠杆倍数 (1-125)')
+    leverage_parser.add_argument('--env', choices=['main', 'test'], 
+                               default='test', help='选择环境 (main 或 test)')
+    
+    return parser
 
-    def _get_timestamp(self):
-        return int(time.time() * 1000)
-
-    def _generate_signature(self, params):
-        query_string = urlencode(params)
-        try:
-            signature = hmac.new(
-                self.API_SECRET.encode('utf-8'),
-                query_string.encode('utf-8'),
-                hashlib.sha256
-            ).hexdigest()
-            return signature
-        except Exception as e:
-            raise ValueError(f"签名生成失败: {str(e)}, 请检查API密钥格式是否正确")
-
-    def _send_request(self, method, endpoint, params=None):
-        url = f"{self.BASE_URL}{endpoint}"
-        headers = {'X-MBX-APIKEY': self.API_KEY}
-        
-        if params is None:
-            params = {}
-            
-        params['timestamp'] = self._get_timestamp()
-        
-        try:
-            params['signature'] = self._generate_signature(params)
-            response = requests.request(method, url, headers=headers, params=params)
-            
-            # 检查响应状态码
-            if response.status_code != 200:
-                error_msg = response.json().get('msg', '未知错误')
-                raise ValueError(f"API请求失败 (状态码: {response.status_code}): {error_msg}")
-                
-            return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            raise ValueError(f"网络请求失败: {str(e)}")
-
-    def get_futures_account(self):
-        endpoint = '/fapi/v2/account'
-        return self._send_request('GET', endpoint)
-
-    def get_mark_price(self, symbol):
-        endpoint = '/fapi/v1/premiumIndex'
-        params = {'symbol': symbol}
-        return self._send_request('GET', endpoint, params)
-
-def format_number(number, decimals=2):
-    """格式化数字，添加千位分隔符"""
+def handle_leverage_command(args, api_key, api_secret):
+    """处理修改杠杆的命令"""
+    from src.client.binance_client import BinanceClient
+    
     try:
-        return f"{float(number):,.{decimals}f}"
-    except (ValueError, TypeError):
-        return str(number)
-
-def get_futures_account_info():
-    try:
-        # 初始化客户端
-        client = BinanceClient(API_KEY, API_SECRET)
-        
-        # 获取账户信息
-        futures_account = client.get_futures_account()
-        positions = futures_account['positions']
-        
-        # 过滤出有持仓的合约
-        active_positions = [p for p in positions if float(p['positionAmt']) != 0]
-        
-        # 打印账户总览
-        total_wallet_balance = float(futures_account['totalWalletBalance'])
-        total_unrealized_profit = float(futures_account['totalUnrealizedProfit'])
-        
-        print("\n=== 账户总览 ===")
-        print(f"钱包余额: {format_number(total_wallet_balance)} USDT")
-        print(f"未实现盈亏: {format_number(total_unrealized_profit)} USDT")
-        print(f"总资产: {format_number(total_wallet_balance + total_unrealized_profit)} USDT")
-        
-        # 打印持仓信息
-        if active_positions:
-            print("\n=== 当前持仓 ===")
-            position_data = []
-            for position in active_positions:
-                symbol = position['symbol']
-                position_amt = float(position['positionAmt'])
-                entry_price = float(position['entryPrice'])
-                unrealized_profit = float(position['unrealizedProfit'])
-                leverage = float(position['leverage'])
-                
-                # 获取当前市价
-                mark_price_info = client.get_mark_price(symbol)
-                mark_price = float(mark_price_info['markPrice'])
-                
-                # 计算收益率
-                if position_amt != 0:
-                    roi = (unrealized_profit / (abs(position_amt) * entry_price / leverage)) * 100
-                else:
-                    roi = 0
-                
-                position_data.append([
-                    symbol,
-                    "多" if position_amt > 0 else "空",
-                    format_number(abs(position_amt), 4),
-                    format_number(entry_price, 4),
-                    format_number(mark_price, 4),
-                    f"{leverage}x",
-                    format_number(unrealized_profit),
-                    f"{format_number(roi)}%"
-                ])
-            
-            headers = ["交易对", "方向", "数量", "开仓价", "标记价", "杠杆", "未实现盈亏", "收益率"]
-            print(tabulate(position_data, headers=headers, tablefmt="grid", disable_numparse=True))
-        else:
-            print("\n当前没有持仓")
-            
-    except ValueError as e:
-        print(f"错误: {str(e)}")
+        client = BinanceClient(api_key, api_secret, testnet=(args.env == 'test'))
+        result = client.change_leverage(args.symbol.upper(), args.leverage)
+        print(f"\n杠杆修改成功: {result['leverage']}x")
     except Exception as e:
-        print(f"发生未知错误: {str(e)}")
-        if hasattr(e, '__traceback__'):
-            import traceback
-            print("\n详细错误信息:")
-            traceback.print_tb(e.__traceback__)
+        print(f"修改杠杆失败: {str(e)}")
+        sys.exit(1)
 
-if __name__ == "__main__":
+def interactive_menu():
+    """交互式菜单"""
+    while True:
+        # 主菜单选项
+        action = questionary.select(
+            "请选择操作:",
+            choices=[
+                questionary.Choice("1. 运行测试网环境", "test"),
+                questionary.Choice("2. 运行主网环境", "main"),
+                questionary.Choice("3. 查看账户状态", "status"),
+                questionary.Choice("4. 修改杠杆倍数", "leverage"),
+                questionary.Choice("5. 退出程序", "exit"),
+                questionary.Choice("6. 显示帮助信息", "help")
+            ]
+        ).ask()
+        
+        if action == "exit":
+            print("退出程序")
+            sys.exit(0)
+        elif action == "help":
+            create_parser().print_help()
+            input("\n按回车键继续...")
+            continue
+            
+        try:
+            # 根据命令选择环境
+            api_env = {
+                'test': 'testnet',
+                'main': 'mainnet'
+            }.get(action)
+            
+            # 对于需要选择环境的操作
+            if action in ["status", "leverage"]:
+                env_choice = questionary.select(
+                    "请选择环境:",
+                    choices=[
+                        questionary.Choice("主网环境", "main"),
+                        questionary.Choice("测试网环境", "test")
+                    ]
+                ).ask()
+                api_env = 'mainnet' if env_choice == 'main' else 'testnet'
+            
+            # 处理特殊命令
+            if action == "leverage":
+                symbol = questionary.text("请输入交易对 (例如 BTCUSDT):").ask()
+                leverage = questionary.text("请输入杠杆倍数 (1-125):").ask()
+                
+                try:
+                    leverage = int(leverage)
+                    if not (1 <= leverage <= 125):
+                        print("杠杆倍数必须在1-125之间")
+                        continue
+                        
+                    args = type('Args', (), {
+                        'command': 'leverage',
+                        'symbol': symbol,
+                        'leverage': leverage,
+                        'env': env_choice
+                    })()
+                    
+                    api_key, api_secret, _ = load_api_config(api_env)
+                    handle_leverage_command(args, api_key, api_secret)
+                    
+                except ValueError:
+                    print("杠杆倍数必须是整数")
+                    continue
+                    
+            else:
+                # 处理其他命令
+                api_key, api_secret, is_testnet = load_api_config(api_env)
+                
+                if action == "test" or (action == "status" and env_choice == "test"):
+                    run_testnet(api_key, api_secret)
+                elif action == "main" or (action == "status" and env_choice == "main"):
+                    run_mainnet(api_key, api_secret)
+                        
+        except Exception as e:
+            print(f"错误: {str(e)}")
+                
+        # 操作完成后暂停
+        input("\n按回车键继续...")
+
+def main():
+    """主程序入口"""
     # 设置标准输出编码
     if sys.stdout.encoding != 'utf-8':
         try:
@@ -145,4 +163,48 @@ if __name__ == "__main__":
             import codecs
             sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
     
-    get_futures_account_info() 
+    # 创建命令行解析器
+    parser = create_parser()
+    args = parser.parse_args()
+    
+    # 如果没有提供命令，启动交互式菜单
+    if not args.command:
+        try:
+            interactive_menu()
+            return
+        except KeyboardInterrupt:
+            print("\n程序已退出")
+            sys.exit(0)
+    
+    try:
+        # 根据命令选择环境
+        env = {
+            'test': 'testnet',
+            'main': 'mainnet',
+            'trade': 'testnet',
+            'status': 'mainnet' if args.env == 'main' else 'testnet',
+            'leverage': 'mainnet' if args.env == 'main' else 'testnet'
+        }[args.command]
+        
+        # 加载API配置
+        api_key, api_secret = load_api_config(env)
+        
+        # 处理不同的命令
+        if args.command == 'leverage':
+            handle_leverage_command(args, api_key, api_secret)
+        elif args.command in ['test', 'trade']:
+            run_testnet(api_key, api_secret)
+        elif args.command == 'status':
+            if args.env == 'main':
+                run_mainnet(api_key, api_secret)
+            else:
+                run_testnet(api_key, api_secret)
+        else:  # main
+            run_mainnet(api_key, api_secret)
+            
+    except Exception as e:
+        print(f"错误: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main() 
