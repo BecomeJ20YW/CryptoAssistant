@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# API配置文件
+api_config.json
+
+# 环境文件
+.env
+.venv
+env/
+venv/
+
+# IDE
+.idea/
+.vscode/ 
